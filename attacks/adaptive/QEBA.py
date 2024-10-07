@@ -10,17 +10,30 @@ import numpy as np
 from attacks.Attack import Attack
 import torch_dct as dct
 import torch.nn.functional as F
+import matplotlib.pyplot as plt
 
-
+firstLogits=[]
+secondLogits = []
+plotIndex=[]
+currentIndex=0
 class QEBA(Attack):
     def __init__(self, model, model_config, attack_config):
         super().__init__(model, model_config, attack_config)
 
     def phi(self, x, y, targeted):
+        global firstLogits, secondLogits, plotIndex, currentIndex
         x = torch.clamp(x, 0, 1)
         logits, is_cache = [], []
         for x_i in x:
             logits_i, is_cache_i = self.model(x_i.unsqueeze(0))
+            print("QEBA logits, is_cache_i=", is_cache_i[0])
+            sortedList = logits_i[0].tolist()
+            sortedList.sort(reverse=True)
+            print("sortedList=", sortedList[:2])
+            firstLogits.append(sortedList[0])
+            secondLogits.append(sortedList[1])
+            plotIndex.append(currentIndex);
+            currentIndex+=1
             logits.append(logits_i.cpu())
             is_cache.extend(is_cache_i)
         logits = torch.cat(logits, dim=0)
@@ -32,9 +45,12 @@ class QEBA(Attack):
     def binary_search_to_boundary(self, x, y, x_adv, threshold, targeted):
         alpha_low = 0
         alpha_high = 1
+        global currentIndex
+        print("Begin binary search to boundary... currentIndex=", currentIndex)
         while alpha_high - alpha_low > threshold:
             alpha_middle = (alpha_low + alpha_high) / 2
             interpolated = (1 - alpha_middle) * x_adv + alpha_middle * x
+            #print("binary_search interpolated", interpolated)
             decision, is_cache = self.phi(interpolated, y, targeted)
             if is_cache[0] and not self.attack_config["adaptive"]["bs_boundary_end_on_hit"]:
                 break
@@ -45,9 +61,12 @@ class QEBA(Attack):
             else:
                 alpha_low = alpha_middle
         interpolated = (1 - alpha_low) * x_adv + alpha_low * x
+        print("End binary search to boundary... currentIndex=", currentIndex)
+        #print("Binary search result x_adv is ", interpolated)
         return interpolated
 
     def binary_search_gradient_estimation_variance(self, x):
+        global firstLogits, secondLogits, plotIndex, currentIndex
         lower = self.attack_config["adaptive"]["bs_grad_var_lower"]
         upper = self.attack_config["adaptive"]["bs_grad_var_upper"]
         var = upper
@@ -61,6 +80,15 @@ class QEBA(Attack):
                 noisy_img = x + noise
                 noisy_img = torch.clamp(noisy_img, min=0, max=1)
                 probs, is_cache = self.model(noisy_img)
+                print("QEBA logits, is_cache_i=", is_cache[0])
+                sortedList = probs[0].tolist()
+                sortedList.sort(reverse=True)
+                print("sortedList=", sortedList[:2])
+                #print(sortedList[0],sortedList[1])
+                firstLogits.append(sortedList[0])
+                secondLogits.append(sortedList[1])
+                plotIndex.append(currentIndex);
+                currentIndex+=1
                 if is_cache[0]:
                     cache_hits += 1
             if cache_hits / self.attack_config["adaptive"]["bs_grad_var_sample_size"] \
@@ -191,6 +219,8 @@ class QEBA(Attack):
         theta = 1 / (torch.sqrt(dim) * dim)
 
         # initialize
+        #print("x_adv is", x_adv)
+        #print("x is", x)
         x_adv = self.binary_search_to_boundary(x, y, x_adv, 0.001, targeted=True)
         x_adv_prev = None
         step_attempts = 0
@@ -217,6 +247,7 @@ class QEBA(Attack):
             # 3. estimate gradient
             fval_obtained = torch.zeros(0, 1, 1, 1).to(x.device)
             dirs_obtained = x_adv.repeat(0, 1, 1, 1).to(x.device)
+            print("Estimate gradient... currentIndex=", currentIndex)
             for _ in range(self.attack_config["adaptive"]["grad_max_attempts"]):
                 dirs_low_dim = torch.randn(num_dirs_,
                                            x_adv.shape[1],
@@ -256,8 +287,9 @@ class QEBA(Attack):
                 fval -= torch.mean(fval)
                 grad = torch.mean(fval * dirs, dim=0)
             grad = grad / torch.linalg.norm(grad)
-
+            print("End estimate gradient... currentIndex=", currentIndex)
             # 4. step size search
+            print("Step size search...currentIndex=", currentIndex)
             step_attempts += 1
             eta = torch.linalg.norm(x_adv - x) / np.sqrt(t + 1)
             while True:
@@ -275,7 +307,7 @@ class QEBA(Attack):
             if rollback:
                 continue
             step_attempts = 0
-
+            print("End step size search...currentIndex=", currentIndex)
             # 5. update
             x_adv = torch.clamp(x_adv + eta * grad, 0, 1)
             x_adv_prev = x_adv.clone()
@@ -284,9 +316,25 @@ class QEBA(Attack):
             x_adv = self.binary_search_to_boundary(x, y, x_adv, threshold=theta, targeted=True)
 
             # 7. check budget and log progress
+            print("Check budget and log progress...currentIndex=", currentIndex)
             norm_dist = torch.linalg.norm(x_adv - x) / (x.shape[-1] * x.shape[-2] * x.shape[-3]) ** 0.5
             pbar.set_description(
                 f"Iter {t} | L2_normalized={norm_dist:.4f} | Cache Hits : {self.get_cache_hits()}/{self.get_total_queries()} | delta={delta:.4f}")
             if norm_dist <= self.attack_config["eps"]:
+                # Create the plot
+                global firstLogits, secondLogits, plotIndex
+                print(firstLogits)
+                print(secondLogits)
+                plt.figure(figsize=(14, 6))
+                plt.rcParams['figure.dpi'] = 300
+                plt.plot(range(1, len(firstLogits) + 1), firstLogits, marker='o', linestyle='-', color='b', linewidth=1, markersize=6, label='Largest Probability Score')
+                plt.plot(range(1, len(secondLogits) + 1), secondLogits, marker='x', linestyle='-', color='r', linewidth=1, markersize=6, label='Second Largest Probability Score')
+                # Add labels and title
+                plt.xlabel('Inference Requests',fontsize=22)
+                plt.ylabel('Probability Score',fontsize=22)
+                plt.title('Top-2 Probability Scores for QEBA Attack',fontsize=22)
+                plt.legend(fontsize=20)
+                # Show the plot
+                plt.show()
                 return x_adv
         return x

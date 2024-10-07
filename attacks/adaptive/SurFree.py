@@ -8,14 +8,27 @@ import random
 import numpy as np
 from torch_dct import dct_2d, idct_2d
 from attacks.Attack import Attack
-
+import matplotlib.pyplot as plt
+firstLogits=[]
+secondLogits = []
+plotIndex=[]
+currentIndex=0
 
 class SurFree(Attack):
     def __init__(self, model, model_config, attack_config):
         super().__init__(model, model_config, attack_config)
 
     def is_adversarial(self, x, y, targeted):
+        global firstLogits, secondLogits, plotIndex, currentIndex
         logits, is_cache = self.model(x)
+        print("Surfree logits, is_cache_i=", is_cache[0])
+        sortedList = logits[0].tolist()
+        sortedList.sort(reverse=True)
+        print("sortedList=", sortedList[:2])
+        firstLogits.append(sortedList[0])
+        secondLogits.append(sortedList[1])
+        plotIndex.append(currentIndex);
+        currentIndex+=1
         if targeted:
             return (logits.argmax(dim=1) == y).float(), is_cache
         else:
@@ -242,7 +255,23 @@ class SurFree(Attack):
             pbar.set_description(
                 f"Step {t}: Norm distance: {norm_dist} | Cache Hits : {self._model.cache_hits}/{self._model.total}")
             if norm_dist < self.attack_config["eps"]:
+                # Create the plot
+                global firstLogits, secondLogits, plotIndex
+                #print(firstLogits)
+                #print(secondLogits)
+                plt.figure(figsize=(14, 6))
+                plt.rcParams['figure.dpi'] = 300
+                plt.plot(range(1, len(firstLogits) + 1), firstLogits, marker='o', linestyle='-', color='b', linewidth=1, markersize=6, label='Largest Probability Score')
+                plt.plot(range(1, len(secondLogits) + 1), secondLogits, marker='x', linestyle='-', color='r', linewidth=1, markersize=6, label='Second Largest Probability Score')
+                # Add labels and title
+                plt.xlabel('Inference Requests',fontsize=22)
+                plt.ylabel('Probability Score',fontsize=22)
+                plt.title('Top-2 Probability Scores for Surfree Attack',fontsize=22)
+                plt.legend(fontsize=20)
+                # Show the plot
+                plt.show()
                 return x_adv
+            
 
         # final binary search
         x_adv = self.binary_search_to_boundary(x, y, x_adv, targeted=False)
@@ -251,8 +280,11 @@ class SurFree(Attack):
             return x_adv
         else:
             return x
+            
+  
 
     def binary_search_min_angle(self, x, x_adv):
+        global firstLogits, secondLogits, plotIndex, currentIndex
         direction = (x_adv - x) / torch.linalg.norm(x_adv - x)
         explored_orthogonal_directions = (x_adv - x) / torch.linalg.norm(x_adv - x)
 
@@ -279,6 +311,14 @@ class SurFree(Attack):
                     0, 1)
                 noisy_img = evolution_function(torch.tensor(mid).to(x.device))
                 probs, is_cache = self.model(noisy_img)
+                sortedList = probs[0].tolist()
+                sortedList.sort(reverse=True)
+                print("sortedList=", sortedList[:2])
+                #print(sortedList[0],sortedList[1])
+                firstLogits.append(sortedList[0])
+                secondLogits.append(sortedList[1])
+                plotIndex.append(currentIndex);
+                currentIndex+=1
                 if is_cache[0]:
                     cache_hits += 1
             if cache_hits / self.attack_config["adaptive"]["bs_min_angle_sample_size"] \
@@ -293,7 +333,7 @@ class SurFree(Attack):
 
     def attack_targeted(self, x, y, x_adv):
         # Initialize
-        y = torch.argmax(self._model.model(x)).unsqueeze(0)
+        y = torch.argmax(self._model.model(x)).unsqueeze(0)       
         x_adv = self.binary_search_to_boundary(x, y, x_adv, targeted=False)
         norm_dist = torch.linalg.norm(x_adv - x) / (x.shape[-1] * x.shape[-2] * x.shape[-3]) ** 0.5
         explored_orthogonal_directions = ((x_adv - x) / torch.linalg.norm(x_adv - x))
@@ -431,6 +471,7 @@ class SurFree(Attack):
         x_adv = self.binary_search_to_boundary(x, y, x_adv, targeted=False)
         norm_dist = torch.linalg.norm(x_adv - x) / (x.shape[-1] * x.shape[-2] * x.shape[-3]) ** 0.5
         if norm_dist < self.attack_config["eps"]:
+            
             return x_adv
         else:
             return x
